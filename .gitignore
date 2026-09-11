@@ -1,0 +1,8 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.geof_cobs_task.json
+publish_result.json
+jobs/
+test-runs/
+.venv/
