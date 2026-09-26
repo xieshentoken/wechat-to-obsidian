@@ -22,7 +22,7 @@ This repository is an Agent Skill (Codex/Claude skill package). The core is `scr
 | --- | --- | --- |
 | WeChat | Browser-compatible request headers + real article content marker | Fails before creating any file when an access-challenge/verification page is detected |
 | x.ai News | Page title marker + scoped `prose` body + `NewsArticle` JSON-LD | Fails when any marker is missing |
-| X Article | Visible `x-article-body` marker + serialized Draft.js data | Fails if any atomic block, media entity, or image URL cannot be mapped — no text-only fallback is published |
+| X Article | Visible `x-article-body` marker + a complete article serialization (current inline `content_state` stream or legacy Draft.js) | Fails if any atomic block, media entity, or image URL cannot be mapped — no text-only fallback is published |
 
 ## Security Design
 
@@ -41,6 +41,10 @@ git clone https://github.com/xieshentoken/wechat-to-obsidian.git \
 ```
 
 Python ≥ 3.10, zero third-party dependencies (standard library only).
+
+## Changelog
+
+- **v2.4.0** — Adapted to X's new RSC streaming article serialization (inline `content_state:$R[n]` inside `data-tsr-stream-part`): both the inline `content_state` and the legacy Draft.js serializations are supported, along with MEDIA / MARKDOWN / DIVIDER / TWEET entities and poster images for videos. See [`X_ARTICLE_FORMAT_FIX_PLAN.md`](X_ARTICLE_FORMAT_FIX_PLAN.md).
 
 ## Usage
 

@@ -33,10 +33,12 @@ headline/author/date/description, and localizes the JSON-LD cover image when one
 If those article markers are missing, it fails before creating any file.
 
 For public X Articles at `x.com/.../status/...`, the publisher requires both the visible
-`x-article-body` marker and the page's serialized Draft.js article data. It rebuilds the
-article from ordered Draft.js blocks, localizes the cover and body images, and inserts every
-body image at its mapped atomic-block position. Avatars, reply images, and other page chrome
-are excluded. If an atomic block, media entity, or image URL cannot be mapped completely, it
+`x-article-body` marker and a complete article serialization. It accepts the current inline
+`content_state` stream and the legacy Draft.js serialization, joins stream chunks in document
+order, and rebuilds the article from ordered blocks. Cover and body images are localized and
+inserted at their mapped positions; markdown cards, dividers, and embedded-tweet links are
+kept. Video items use the poster image. Avatars, reply images, and other page chrome are
+excluded. If a block, entity, media identifier, or image URL cannot be mapped completely, it
 fails before creating any file instead of publishing a text-only fallback.
 
 After the command succeeds, report the returned repository-relative note path, image count,

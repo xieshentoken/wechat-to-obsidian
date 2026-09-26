@@ -22,7 +22,7 @@
 | --- | --- | --- |
 | 微信 | 浏览器兼容请求头 + 真实正文标记 | 遇到「环境异常/验证」页在创建任何文件前失败 |
 | x.ai News | 页面标题标记 + `prose` 正文 + `NewsArticle` JSON-LD | 标记缺失即失败 |
-| X Article | 可见 `x-article-body` 标记 + 序列化 Draft.js 数据 | 任一原子块/媒体实体/图片 URL 无法映射即失败，不发布纯文本降级版 |
+| X Article | 可见 `x-article-body` 标记 + 完整序列化内容（当前内联 `content_state` 流或旧版 Draft.js） | 任一原子块/媒体实体/图片 URL 无法映射即失败，不发布纯文本降级版 |
 
 ## 安全设计
 
@@ -41,6 +41,10 @@ git clone https://github.com/xieshentoken/wechat-to-obsidian.git \
 ```
 
 Python ≥ 3.10，零第三方依赖（仅标准库）。
+
+## 变更记录
+
+- **v2.4.0** — 适配 x.com 新的 RSC 流式文章序列化（`data-tsr-stream-part` 内 `content_state:$R[n]`）：支持内联 `content_state` 与旧版 Draft.js 两种序列化，支持 MEDIA / MARKDOWN / DIVIDER / TWEET 实体，视频取 poster 图。详见 [`X_ARTICLE_FORMAT_FIX_PLAN.md`](X_ARTICLE_FORMAT_FIX_PLAN.md)。
 
 ## 使用方式
 

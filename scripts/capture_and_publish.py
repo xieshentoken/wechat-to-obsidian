@@ -615,6 +615,42 @@ def xai_news_metadata(root: Node) -> dict[str, str]:
 JS_STRING_PATTERN = r'"(?:\\["\\/bfnrt]|\\u[0-9a-fA-F]{4}|[^"\\\x00-\x1f])*"'
 
 
+# X Articles are serialized either in the legacy Draft.js shape or in the
+# current inline content_state shape (Chrome console-style $R[n]={...}
+# references inside a data-tsr-stream-part script). Both parsers share the
+# JS string handling above and the text block renderer below.
+X_FLAT_DATA_PATTERN = r'(?:[^{}]|\{[^{}]*\})*'
+X_STREAM_CONTENT_STATE = re.compile(
+    r'content_state:\$R\[\d+\]=\{blocks:\$R\[\d+\]=\['
+)
+X_STREAM_BLOCKS_END = "],entity_map:"
+X_STREAM_ENTITY_MAP = re.compile(r'\],entity_map:\$R\[\d+\]=\[')
+X_STREAM_ENTITIES_END = "]},"
+X_STREAM_BLOCK = re.compile(
+    r'\$R\[\d+\]=\{data:\$R\[\d+\]=\{' + X_FLAT_DATA_PATTERN + r'\},'
+    r'(?:depth:\d+,)?'
+    r'entity_ranges:\$R\[\d+\]=\[((?:\$R\[\d+\]=\{key:\d+,length:\d+,offset:\d+\},?)*)\],'
+    r'inline_style_ranges:\$R\[\d+\]=\[(?:\$R\[\d+\]=\{length:\d+,offset:\d+,style:"[^"]+"\},?)*\],'
+    r'key:' + JS_STRING_PATTERN + r',text:(' + JS_STRING_PATTERN + r'),type:(' + JS_STRING_PATTERN + r')\}'
+)
+X_STREAM_ENTITY = re.compile(
+    r'\$R\[\d+\]=\{key:(' + JS_STRING_PATTERN + r'),value:\$R\[\d+\]=\{'
+    r'data:\$R\[\d+\]=\{(' + X_FLAT_DATA_PATTERN + r')\},type:(' + JS_STRING_PATTERN + r')\}\}'
+)
+X_STREAM_TITLE = re.compile(r'title:(' + JS_STRING_PATTERN + r')\}\}\}')
+X_STREAM_COVER = re.compile(
+    r'cover_media_results:\$R\[\d+\]=\{[^{}]*,result:\$R\[\d+\]=\{[^{}]*,'
+    r'media_info:\$R\[\d+\]=\{__typename:"ApiImage",original_img_height:\d+,'
+    r'original_img_url:(' + JS_STRING_PATTERN + r')'
+)
+X_STREAM_MEDIA_LIST = re.compile(r'media_entities:\$R\[\d+\]=\[')
+X_STREAM_MEDIA_ENTRY = re.compile(r'\$R\[\d+\]=\{id:')
+X_STREAM_MEDIA_ID = re.compile(r'media_id:"(\d+)"')
+X_STREAM_IMAGE_URL = re.compile(r'original_img_url:(' + JS_STRING_PATTERN + r')')
+X_STREAM_MARKDOWN = re.compile(r'markdown:(' + JS_STRING_PATTERN + r')')
+X_STREAM_TWEET_ID = re.compile(r'tweet_id:"(\d+)"')
+
+
 def decode_js_string(token: str, field_name: str) -> str:
     try:
         value = json.loads(token)
@@ -635,16 +671,23 @@ def x_article_stream(root: Node) -> str:
         if node.tag != "script":
             continue
         value = raw_node_text(node)
+        if '__typename:"ArticleEntity"' not in value:
+            continue
         if (
-            '__typename:"ArticleEntity"' in value
-            and '__typename:"DraftJsContentState"' in value
+            '__typename:"DraftJsContentState"' not in value
+            and not X_STREAM_CONTENT_STATE.search(value)
         ):
-            candidates.append(value)
+            continue
+        candidates.append(value)
     if not candidates:
         raise CaptureError(
-            "X Article Draft.js data is missing; refusing to publish a text-only fallback"
+            "X Article content serialization is missing; "
+            "refusing to publish a text-only fallback"
         )
-    return max(candidates, key=lambda value: (value.count("original_img_url"), len(value)))
+    # The current RSC serialization chunks the stream across consecutive
+    # script elements, so candidates are joined in document order instead of
+    # picking a single script.
+    return "".join(candidates)
 
 
 def x_article_cover_url(root: Node, source_url: str) -> str:
@@ -659,12 +702,55 @@ def x_article_cover_url(root: Node, source_url: str) -> str:
     return ""
 
 
+def render_x_text_block(block_type: str, block_text: str) -> str:
+    """Render one non-atomic X Article block as Markdown (shared by both serializers)."""
+    text = normalize_inline_text(block_text)
+    if not text:
+        return ""
+    heading_match = re.fullmatch(r"header-([a-z]+)", block_type)
+    heading_levels = {
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+    }
+    if heading_match and heading_match.group(1) in heading_levels:
+        return f"{'#' * heading_levels[heading_match.group(1)]} {text}"
+    if block_type == "unordered-list-item":
+        return f"- {text}"
+    if block_type == "ordered-list-item":
+        return f"1. {text}"
+    if block_type == "blockquote":
+        return f"> {text}"
+    if block_type == "code-block":
+        longest_fence = max(
+            (len(value.group()) for value in re.finditer(r"`+", block_text)),
+            default=0,
+        )
+        fence = "`" * max(3, longest_fence + 1)
+        return f"{fence}text\n{block_text}\n{fence}"
+    return text
+
+
 def extract_x_article(root: Node, source_url: str) -> dict:
     if not has_x_article_body(root):
         raise CaptureError(
             "X Article body marker is missing; refusing to publish a fallback page"
         )
     stream = x_article_stream(root)
+    if X_STREAM_CONTENT_STATE.search(stream):
+        return extract_x_article_content_state(stream, root, source_url)
+    if '__typename:"DraftJsContentState"' in stream:
+        return extract_x_article_draftjs(stream, root, source_url)
+    raise CaptureError(
+        "X Article content serialization is unsupported; "
+        "refusing to publish a text-only fallback"
+    )
+
+
+def extract_x_article_draftjs(stream: str, root: Node, source_url: str) -> dict:
 
     title_match = re.search(
         rf'__typename:"ArticleEntity",title:({JS_STRING_PATTERN})',
@@ -783,35 +869,9 @@ def extract_x_article(root: Node, source_url: str) -> dict:
             markdown_parts.extend(block_markers)
             continue
 
-        text = normalize_inline_text(block_text)
-        if not text:
-            continue
-        heading_match = re.fullmatch(r"header-([a-z]+)", block_type)
-        heading_levels = {
-            "one": 1,
-            "two": 2,
-            "three": 3,
-            "four": 4,
-            "five": 5,
-            "six": 6,
-        }
-        if heading_match and heading_match.group(1) in heading_levels:
-            markdown_parts.append(f"{'#' * heading_levels[heading_match.group(1)]} {text}")
-        elif block_type == "unordered-list-item":
-            markdown_parts.append(f"- {text}")
-        elif block_type == "ordered-list-item":
-            markdown_parts.append(f"1. {text}")
-        elif block_type == "blockquote":
-            markdown_parts.append(f"> {text}")
-        elif block_type == "code-block":
-            longest_fence = max(
-                (len(value.group()) for value in re.finditer(r"`+", block_text)),
-                default=0,
-            )
-            fence = "`" * max(3, longest_fence + 1)
-            markdown_parts.append(f"{fence}text\n{block_text}\n{fence}")
-        else:
-            markdown_parts.append(text)
+        rendered = render_x_text_block(block_type, block_text)
+        if rendered:
+            markdown_parts.append(rendered)
 
     markdown = "\n\n".join(markdown_parts).strip()
     if len(normalize_inline_text(markdown)) < X_ARTICLE_MIN_CHARS:
@@ -822,6 +882,178 @@ def extract_x_article(root: Node, source_url: str) -> dict:
         "images": images,
         "math_count": 0,
         "article_marker": "x:article+draftjs",
+    }
+
+
+def extract_x_article_content_state(stream: str, root: Node, source_url: str) -> dict:
+    """Parse the current inline content_state serialization of an X Article.
+
+    The article is serialized as Chrome-console-style $R[n]={...} objects inside
+    a data-tsr-stream-part script. Blocks and entities are consumed contiguously:
+    any structural mismatch raises instead of silently skipping content.
+    """
+    anchor = X_STREAM_CONTENT_STATE.search(stream)
+    if anchor is None:
+        raise CaptureError(
+            "X Article content serialization is unsupported; "
+            "refusing to publish a text-only fallback"
+        )
+    region_start = anchor.start()
+
+    blocks: list[re.Match] = []
+    position = anchor.end()
+    while True:
+        if stream.startswith(X_STREAM_BLOCKS_END, position):
+            break
+        match = X_STREAM_BLOCK.match(stream, position)
+        if match is None:
+            raise CaptureError("X Article content_state block sequence is malformed")
+        blocks.append(match)
+        position = match.end()
+        if stream[position:position + 1] == ",":
+            position += 1
+    if not blocks or len(blocks) > MAX_X_DRAFT_BLOCKS:
+        raise CaptureError("X Article content_state block count is invalid")
+
+    entity_map_match = X_STREAM_ENTITY_MAP.match(stream, position)
+    if entity_map_match is None:
+        raise CaptureError("X Article content_state entity map is missing")
+    position = entity_map_match.end()
+    entities: dict[int, tuple[str, str]] = {}
+    while True:
+        if stream.startswith(X_STREAM_ENTITIES_END, position):
+            position += len(X_STREAM_ENTITIES_END)
+            break
+        match = X_STREAM_ENTITY.match(stream, position)
+        if match is None:
+            raise CaptureError("X Article content_state entity map is malformed")
+        raw_key = decode_js_string(match.group(1), "entity key")
+        if not raw_key.isdigit():
+            raise CaptureError("X Article media entity key is malformed")
+        entities[int(raw_key)] = (
+            decode_js_string(match.group(3), "entity type"),
+            match.group(2),
+        )
+        position = match.end()
+        if stream[position:position + 1] == ",":
+            position += 1
+
+    title_match = X_STREAM_TITLE.search(stream, position)
+    if title_match is None:
+        raise CaptureError("X Article metadata or content state is incomplete")
+    region_start = position
+    region_end = title_match.end()
+    title = normalize_inline_text(decode_js_string(title_match.group(1), "title"))
+    if not title:
+        raise CaptureError("X Article title is missing")
+
+    cover_url = ""
+    cover_match = X_STREAM_COVER.search(stream, region_start, region_end)
+    if cover_match is not None:
+        try:
+            cover_url = normalize_public_https_url(
+                decode_js_string(cover_match.group(1), "image URL")
+            )
+        except CaptureError:
+            cover_url = ""
+    if not cover_url:
+        cover_url = x_article_cover_url(root, source_url)
+
+    media_urls: dict[str, str] = {}
+    media_list_match = X_STREAM_MEDIA_LIST.search(stream, region_start, region_end)
+    if media_list_match is not None:
+        media_entries = list(
+            X_STREAM_MEDIA_ENTRY.finditer(stream, media_list_match.end(), region_end)
+        )
+        for index, entry in enumerate(media_entries):
+            end = (
+                media_entries[index + 1].start()
+                if index + 1 < len(media_entries)
+                else region_end
+            )
+            segment = stream[entry.start():min(end, entry.start() + 4096)]
+            media_id_match = X_STREAM_MEDIA_ID.search(segment)
+            image_match = X_STREAM_IMAGE_URL.search(segment)
+            if media_id_match is None or image_match is None:
+                continue
+            media_urls[media_id_match.group(1)] = normalize_public_https_url(
+                decode_js_string(image_match.group(1), "image URL")
+            )
+
+    images: list[dict[str, str | int]] = []
+    markdown_parts: list[str] = []
+    if cover_url:
+        images.append({"index": 1, "url": cover_url})
+        markdown_parts.append("{{GEOF_IMAGE_1}}")
+
+    for block_index, match in enumerate(blocks):
+        block_text = decode_js_string(match.group(2), "block text")
+        block_type = decode_js_string(match.group(3), "block type")
+        if block_type != "atomic":
+            rendered = render_x_text_block(block_type, block_text)
+            if rendered:
+                markdown_parts.append(rendered)
+            continue
+
+        entity_keys = [
+            int(value)
+            for value in re.findall(r"\{key:(\d+),length:\d+,offset:\d+\}", match.group(1))
+        ]
+        if not entity_keys:
+            raise CaptureError(
+                f"X Article atomic block {block_index} has no media mapping"
+            )
+        for entity_key in entity_keys:
+            entity = entities.get(entity_key)
+            if entity is None:
+                raise CaptureError(
+                    f"X Article atomic block {block_index} has an unsupported entity"
+                )
+            entity_type, entity_data = entity
+            if entity_type == "MEDIA":
+                media_ids = X_STREAM_MEDIA_ID.findall(entity_data)
+                if not media_ids:
+                    raise CaptureError("X Article media entity has no media identifier")
+                for media_id in media_ids:
+                    image_url = media_urls.get(media_id)
+                    if not image_url:
+                        raise CaptureError(
+                            f"X Article image data is missing for media {media_id}"
+                        )
+                    if len(images) >= MAX_IMAGES:
+                        raise CaptureError("X Article image count exceeds the safety limit")
+                    image_index = len(images) + 1
+                    images.append({"index": image_index, "url": image_url})
+                    markdown_parts.append(f"{{{{GEOF_IMAGE_{image_index}}}}}")
+            elif entity_type == "MARKDOWN":
+                markdown_match = X_STREAM_MARKDOWN.search(entity_data)
+                if markdown_match is None:
+                    raise CaptureError("X Article markdown entity has no markdown payload")
+                markdown_parts.append(
+                    decode_js_string(markdown_match.group(1), "markdown")
+                )
+            elif entity_type == "DIVIDER":
+                markdown_parts.append("---")
+            elif entity_type == "TWEET":
+                tweet_match = X_STREAM_TWEET_ID.search(entity_data)
+                if tweet_match is None:
+                    raise CaptureError("X Article tweet entity has no tweet identifier")
+                tweet_url = f"https://x.com/i/web/status/{tweet_match.group(1)}"
+                markdown_parts.append(f"> 嵌入推文：[{tweet_url}]({tweet_url})")
+            else:
+                raise CaptureError(
+                    f"X Article atomic block {block_index} has an unsupported entity"
+                )
+
+    markdown = "\n\n".join(markdown_parts).strip()
+    if len(normalize_inline_text(markdown)) < X_ARTICLE_MIN_CHARS:
+        raise CaptureError("X Article body extraction returned too little text")
+    return {
+        "title": title,
+        "markdown": markdown,
+        "images": images,
+        "math_count": 0,
+        "article_marker": "x:article+content_state",
     }
 
 
