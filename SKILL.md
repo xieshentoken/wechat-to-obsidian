@@ -1,6 +1,6 @@
 ---
 name: wechat-to-obsidian
-description: Save one public HTTPS WeChat article, X Article, xAI News article, or ordinary webpage as a new Obsidian note with localized body images, preserved tables and code blocks, and recoverable LaTeX math. Use only when Watcher invokes this registered skill with a sealed task specification.
+description: Save one public HTTPS WeChat article (including image-message 贴图号 pages), X Article, xAI News article, or ordinary webpage as a new Obsidian note with localized body images, preserved tables and code blocks, and recoverable LaTeX math. Use only when Watcher invokes this registered skill with a sealed task specification.
 ---
 
 # Save a public webpage to Obsidian
@@ -25,7 +25,11 @@ source HTML attributes or scripts, never overwrites an existing file, and emits 
 result manifest, not article content. For WeChat,
 it uses browser-compatible request headers, requires the real article content marker, and
 fails closed on access-challenge or verification pages before creating any file. The note
-keeps the original submitted URL even when the server resolves it to another URL.
+keeps the original submitted URL even when the server resolves it to another URL. For WeChat
+image-message (贴图号) pages, which carry no `js_content` body, it requires the picture-swiper
+markers, localizes the swiper pictures in order into a separate image-gallery section, recovers
+the caption text (keeping 图N references as text) as a separate body section, and fails closed
+when the picture payload or any picture URL cannot be mapped completely.
 
 For `x.ai/news/...`, the publisher requires the page title marker, the scoped `prose` article
 body, and `NewsArticle` JSON-LD. It excludes navigation and footer text, uses the structured
